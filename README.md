@@ -132,10 +132,20 @@ Small utilities that come along for the ride:
 
 | Node | Purpose |
 |---|---|
-| `TS Load Video Batch List From Dir` | Load every clip in a folder as one IMAGE batch (plus AUDIO) per clip, in a deterministic order |
 | `TS Rename Files In Dir` | Renumber a folder into a clean sequence. Has `dry_run` — use it first |
-| `TS Save Pose Data (PKL)` | Save `POSEDATA` to disk |
-| `TS Load Pose Data (PKL)` | Load it back, so you can iterate on generation without re-running detection |
+| `TS Save Pose Data` | Cache `POSEDATA` to disk as `.npz` |
+| `TS Load Pose Data` | Load it back, so you can iterate on generation without re-running detection |
+
+### Pose cache format
+
+Pose files are `.npz`. Earlier releases wrote pickles, which is an
+arbitrary-code-execution format — the load node reads from ComfyUI's `input`
+folder, so a pose file shared by anyone else ran with your permissions. Those
+pickles also embedded the absolute install path of ComfyUI-WanAnimatePreprocess
+as a module name, so they silently broke whenever that pack moved.
+
+Existing `.pkl` caches are not read any more. Re-save them through the node, or
+ask in an issue for the one-off converter script.
 
 `TS Rename Files In Dir` rewrites names on disk. It refuses to write outside the
 target directory, renames in two phases so a new name cannot collide with a

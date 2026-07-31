@@ -4,8 +4,8 @@
 nodes: an object (or dict) with a ``pose_metas`` list, each entry holding separate
 ``kps_*`` coordinate arrays and ``kps_*_p`` confidence arrays as numpy.  The
 smoothing pipeline instead works on the flat OpenPose JSON layout.  This module
-translates in both directions, and loads ``pose_data`` from a pickle when a path is
-handed in.
+translates in both directions, and can load ``pose_data`` from a saved archive
+when a path is handed in.
 
 numpy is the only third-party dependency: no cv2, no torch, no ComfyUI imports.
 """
@@ -13,13 +13,11 @@ numpy is the only third-party dependency: no cv2, no torch, no ComfyUI imports.
 from __future__ import annotations
 
 import copy
-import pickle
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 __all__ = [
-    "_load_pose_data_pkl",
     "_coerce_pose_data_to_obj",
     "_as_attr",
     "_set_attr",
@@ -32,97 +30,16 @@ __all__ = [
 ]
 
 
-class _PoseDummyObj:
-    """Stand-in for a class that is not importable while unpickling.
-
-    Pose pickles reference classes from whichever custom node pack produced them.
-    Rather than requiring that pack to be installed, unknown classes are rebuilt as
-    this permissive placeholder, which just absorbs whatever state it is given so the
-    attributes we care about (``pose_metas``, ``kps_*``) remain readable.
-    """
-
-    def __init__(self, *a: Any, **k: Any) -> None:
-        pass
-
-    def __setstate__(self, state: Any) -> None:
-        if isinstance(state, dict):
-            self.__dict__.update(state)
-        elif isinstance(state, (list, tuple)) and len(state) == 2 and isinstance(state[0], dict):
-            self.__dict__.update(state[0])
-            if isinstance(state[1], dict):
-                self.__dict__.update(state[1])
-            else:
-                self.__dict__["_slotstate"] = state[1]
-        else:
-            self.__dict__["_state"] = state
-
-
-#: Globals a pose pickle is allowed to reference. Everything a real POSEDATA file
-#: needs is numpy's array-reconstruction machinery plus a couple of containers.
-#: Anything outside this map is replaced by :class:`_PoseDummyObj` rather than
-#: imported, which is what stops a crafted file from reaching ``os.system`` or
-#: ``builtins.eval``.
-_PICKLE_ALLOWLIST = {
-    "numpy": {
-        "ndarray",
-        "dtype",
-        "generic",
-        "bool_",
-        "int8", "int16", "int32", "int64",
-        "uint8", "uint16", "uint32", "uint64",
-        "float16", "float32", "float64",
-        "complex64", "complex128",
-    },
-    "numpy.core.multiarray": {"_reconstruct", "scalar"},
-    "numpy.core.numeric": {"_frombuffer"},
-    "collections": {"OrderedDict"},
-}
-
-
-class _SafeUnpickler(pickle.Unpickler):
-    """Unpickler restricted to the globals a pose file legitimately needs.
-
-    ``pickle`` is an arbitrary-code-execution format: unpickling calls whatever
-    the file names.  ``TSLoadPoseDataPickle`` reads files out of ComfyUI's
-    ``input`` folder, so a pose pack downloaded from anywhere is untrusted input.
-    Only names in :data:`_PICKLE_ALLOWLIST` are resolved; everything else becomes
-    an inert :class:`_PoseDummyObj`, so a hostile file loses its payload instead
-    of running it.
-
-    numpy 2 relocated ``numpy.core`` to ``numpy._core``; pickles written by either
-    version are remapped first so both still load.
-    """
-
-    def find_class(self, module: str, name: str) -> Any:
-        if module.startswith("numpy._core"):
-            module = module.replace("numpy._core", "numpy.core", 1)
-        if module.startswith("numpy._globals"):
-            module = module.replace("numpy._globals", "numpy", 1)
-
-        if name in _PICKLE_ALLOWLIST.get(module, ()):
-            try:
-                return super().find_class(module, name)
-            except Exception:
-                return _PoseDummyObj
-
-        # Not on the allowlist: never import it, just hand back something inert.
-        return _PoseDummyObj
-
-
-def _load_pose_data_pkl(path: str) -> Any:
-    """Load a pose_data pickle from ``path`` using the tolerant unpickler."""
-    with open(path, "rb") as f:
-        return _SafeUnpickler(f).load()
-
-
 def _coerce_pose_data_to_obj(pd: Any) -> Any:
     """Normalise the several shapes a POSEDATA input can arrive in.
 
-    Accepts a filesystem path to a pickle, a ``{"pose_data": ...}`` wrapper dict, or
-    the pose_data object itself, and returns the object.
+    Accepts a filesystem path to a saved pose archive, a ``{"pose_data": ...}``
+    wrapper dict, or the pose_data object itself, and returns the object.
     """
     if isinstance(pd, str):
-        return _load_pose_data_pkl(pd)
+        from .posefile import load_posedata
+
+        return load_posedata(pd)
     if isinstance(pd, dict) and "pose_data" in pd:
         return pd["pose_data"]
     return pd
