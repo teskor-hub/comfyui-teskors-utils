@@ -57,12 +57,40 @@ class _PoseDummyObj:
             self.__dict__["_state"] = state
 
 
+#: Globals a pose pickle is allowed to reference. Everything a real POSEDATA file
+#: needs is numpy's array-reconstruction machinery plus a couple of containers.
+#: Anything outside this map is replaced by :class:`_PoseDummyObj` rather than
+#: imported, which is what stops a crafted file from reaching ``os.system`` or
+#: ``builtins.eval``.
+_PICKLE_ALLOWLIST = {
+    "numpy": {
+        "ndarray",
+        "dtype",
+        "generic",
+        "bool_",
+        "int8", "int16", "int32", "int64",
+        "uint8", "uint16", "uint32", "uint64",
+        "float16", "float32", "float64",
+        "complex64", "complex128",
+    },
+    "numpy.core.multiarray": {"_reconstruct", "scalar"},
+    "numpy.core.numeric": {"_frombuffer"},
+    "collections": {"OrderedDict"},
+}
+
+
 class _SafeUnpickler(pickle.Unpickler):
-    """Unpickler that tolerates missing classes and numpy's private module moves.
+    """Unpickler restricted to the globals a pose file legitimately needs.
+
+    ``pickle`` is an arbitrary-code-execution format: unpickling calls whatever
+    the file names.  ``TSLoadPoseDataPickle`` reads files out of ComfyUI's
+    ``input`` folder, so a pose pack downloaded from anywhere is untrusted input.
+    Only names in :data:`_PICKLE_ALLOWLIST` are resolved; everything else becomes
+    an inert :class:`_PoseDummyObj`, so a hostile file loses its payload instead
+    of running it.
 
     numpy 2 relocated ``numpy.core`` to ``numpy._core``; pickles written by either
-    version are remapped so both load.  Anything still unresolvable degrades to
-    :class:`_PoseDummyObj` instead of raising.
+    version are remapped first so both still load.
     """
 
     def find_class(self, module: str, name: str) -> Any:
@@ -70,12 +98,15 @@ class _SafeUnpickler(pickle.Unpickler):
             module = module.replace("numpy._core", "numpy.core", 1)
         if module.startswith("numpy._globals"):
             module = module.replace("numpy._globals", "numpy", 1)
-        if name in {"AAPoseMeta"}:
-            return _PoseDummyObj
-        try:
-            return super().find_class(module, name)
-        except Exception:
-            return _PoseDummyObj
+
+        if name in _PICKLE_ALLOWLIST.get(module, ()):
+            try:
+                return super().find_class(module, name)
+            except Exception:
+                return _PoseDummyObj
+
+        # Not on the allowlist: never import it, just hand back something inert.
+        return _PoseDummyObj
 
 
 def _load_pose_data_pkl(path: str) -> Any:
