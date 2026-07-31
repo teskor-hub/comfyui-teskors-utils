@@ -22,7 +22,7 @@ class TSColorMatchSequentialBias:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("IMAGE",)
     FUNCTION = "process"
-    CATEGORY = "TS_Nodes/Video"
+    CATEGORY = "TS Utils/Video"
 
     EPS = 1e-6
 

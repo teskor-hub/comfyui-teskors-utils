@@ -253,7 +253,7 @@
             "format": "video/h264-mp4",
             "frame_rate": 16,
             "workflow": "vitpose_00015.png",
-            "fullpath": "D:\\ComfyUI_windows_portable\\ComfyUI\\output\\vitpose_00015.mp4"
+            "fullpath": "vitpose_00015.mp4"
           }
         }
       },
@@ -338,7 +338,7 @@
             "format": "video/h264-mp4",
             "frame_rate": 16,
             "workflow": "vitpose_00015.png",
-            "fullpath": "D:\\ComfyUI_windows_portable\\ComfyUI\\output\\vitpose_00015.mp4"
+            "fullpath": "vitpose_00015.mp4"
           }
         }
       },

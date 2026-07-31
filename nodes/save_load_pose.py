@@ -81,7 +81,7 @@ class TSSavePoseDataAsPickle:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("saved_path",)
     FUNCTION = "save"
-    CATEGORY = "save"
+    CATEGORY = "TS Utils/Pose"
 
     def save(self, pose_data, filename=""):
         out_dir = _ensure_output_dir()
@@ -112,7 +112,7 @@ class TSLoadPoseDataPickle:
     RETURN_TYPES = ("POSEDATA",)
     RETURN_NAMES = ("pose_data",)
     FUNCTION = "load"
-    CATEGORY = "load"
+    CATEGORY = "TS Utils/Pose"
 
     def load(self, file):
         if not isinstance(file, str) or not file.strip():

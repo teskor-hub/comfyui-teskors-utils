@@ -1,12 +1,5 @@
-__pycache__/ 
-*.rar 
-"Новая папка/" 
-__pycache__/ 
-*.rar 
-"Новая папка/" 
-__pycache__/ 
-*.rar 
-"Новая папка/" 
-__pycache__/ 
-*.rar 
-"Новая папка/" 
+__pycache__/
+*.py[cod]
+*.rar
+*.zip
+.DS_Store

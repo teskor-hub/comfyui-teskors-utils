@@ -1,0 +1,18 @@
+[project]
+name = "comfyui-teskors-utils"
+description = "Utility nodes for ComfyUI focused on video workflows, OpenPose stability and chunk-based video generation."
+version = "1.0.0"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "opencv-python",
+]
+
+[project.urls]
+Repository = "https://github.com/teskor-hub/comfyui-teskors-utils"
+
+[tool.comfy]
+PublisherId = "teskor"
+DisplayName = "Teskor's Utils"
+Icon = ""

@@ -1,276 +1,311 @@
+"""Load every video in a directory as a list of ComfyUI IMAGE batches.
+
+The node exists for chunked workflows: point it at a folder of clips, get one
+IMAGE batch per clip plus the matching AUDIO, in a deterministic order.
+
+Design notes
+------------
+Frames are decoded with OpenCV and rate conversion is done in the *index*
+domain: a fractional stride ``source_fps / target_fps`` walks forward and the
+nearest source frame is kept.  Working in frame indices rather than accumulated
+timestamps keeps the output length exactly predictable
+(``ceil(n_source / stride)``) and avoids drift on long clips.
+
+Audio is decoded eagerly through ffmpeg into the dict shape ComfyUI expects
+(``{"waveform": (1, channels, samples) float32, "sample_rate": int}``).  Eager
+decoding is affordable here because the node already materialises every frame of
+every clip in memory, so the audio is never the bottleneck.  When ffmpeg is not
+installed the node degrades to silent audio instead of failing the whole graph.
+"""
+
+from __future__ import annotations
+
+import json
 import os
-import re
 import shutil
 import subprocess
-import time
-from collections.abc import Mapping
+from typing import List, Optional, Sequence, Tuple
 
-import torch
 import numpy as np
+import torch
 
 try:
     import cv2
 
-    _has_cv2 = True
-except Exception:
-    _has_cv2 = False
+    _HAS_CV2 = True
+except Exception:  # pragma: no cover - exercised only on broken installs
+    _HAS_CV2 = False
 
-ENCODE_ARGS = ("utf-8", "backslashreplace")
+from ..ts_utils.filesort import SORT_METHODS, sort_names
 
-
-def _pick_ffmpeg_path():
-    if "VHS_FORCE_FFMPEG_PATH" in os.environ:
-        p = os.environ.get("VHS_FORCE_FFMPEG_PATH")
-        if p:
-            return p
-
-    system_ffmpeg = shutil.which("ffmpeg")
-    if system_ffmpeg is not None:
-        return system_ffmpeg
-
-    if os.path.isfile("ffmpeg"):
-        return os.path.abspath("ffmpeg")
-    if os.path.isfile("ffmpeg.exe"):
-        return os.path.abspath("ffmpeg.exe")
-
-    return None
+__all__ = ["LoadVideoBatchListFromDir"]
 
 
-ffmpeg_path = _pick_ffmpeg_path()
+#: Containers we are willing to hand to OpenCV.
+VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"})
+
+#: Latent-space models want spatial dimensions on an 8 pixel grid; anything else
+#: gets silently padded or rejected downstream.
+SIZE_GRID = 8
+
+#: Used when a file carries no audio track, or ffmpeg is unavailable.
+FALLBACK_SAMPLE_RATE = 44100
+
+#: Set this to point at a specific ffmpeg build; otherwise PATH is searched.
+FFMPEG_ENV_VAR = "TS_FFMPEG_PATH"
 
 
-def get_audio(file, start_time=0, duration=0):
-    if ffmpeg_path is None:
-        raise Exception("ffmpeg not found. Put ffmpeg in PATH, or set VHS_FORCE_FFMPEG_PATH env var.")
+# --------------------------------------------------------------------------- #
+# external tools
+# --------------------------------------------------------------------------- #
 
-    args = [ffmpeg_path, "-i", file]
-    if start_time > 0:
-        args += ["-ss", str(start_time)]
-    if duration > 0:
-        args += ["-t", str(duration)]
+
+def _tool_path(name: str, env_var: Optional[str] = None) -> Optional[str]:
+    """Locate an external binary, preferring an explicit override."""
+    if env_var:
+        override = os.environ.get(env_var)
+        if override and os.path.isfile(override):
+            return override
+    return shutil.which(name)
+
+
+def _run_capture(argv: Sequence[str]) -> Optional[bytes]:
+    """Run ``argv`` and return stdout, or ``None`` if it failed in any way."""
+    try:
+        done = subprocess.run(argv, capture_output=True, check=False)
+    except (OSError, ValueError):
+        return None
+    if done.returncode != 0:
+        return None
+    return done.stdout
+
+
+# --------------------------------------------------------------------------- #
+# audio
+# --------------------------------------------------------------------------- #
+
+
+def _audio_layout(path: str) -> Optional[Tuple[int, int]]:
+    """Return ``(sample_rate, channels)`` of the first audio stream.
+
+    ``None`` means the probe failed or the file simply has no audio.
+    """
+    ffprobe = _tool_path("ffprobe")
+    if ffprobe is None:
+        return None
+
+    raw = _run_capture(
+        [
+            ffprobe,
+            "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=sample_rate,channels",
+            "-of", "json",
+            path,
+        ]
+    )
+    if not raw:
+        return None
 
     try:
-        # как в utils: вытаскиваем raw f32le в stdout
-        res = subprocess.run(args + ["-f", "f32le", "-"], capture_output=True, check=True)
-        audio = torch.frombuffer(bytearray(res.stdout), dtype=torch.float32)
-        match = re.search(r", (\d+) Hz, (\w+), ", res.stderr.decode(*ENCODE_ARGS))
-    except subprocess.CalledProcessError as e:
-        raise Exception(f"Failed to extract audio from {file}:\n" + e.stderr.decode(*ENCODE_ARGS))
+        streams = json.loads(raw.decode("utf-8", "replace")).get("streams") or []
+    except ValueError:
+        return None
+    if not streams:
+        return None
 
-    if match:
-        ar = int(match.group(1))
-        ac = {"mono": 1, "stereo": 2}.get(match.group(2), 2)
-    else:
-        ar = 44100
-        ac = 2
-
-    if audio.numel() == 0:
-        empty = torch.zeros((1, 1, 0), dtype=torch.float32)
-        return {"waveform": empty, "sample_rate": ar}
-
-    audio = audio.reshape((-1, ac)).transpose(0, 1).unsqueeze(0)
-    return {"waveform": audio, "sample_rate": ar}
+    head = streams[0]
+    try:
+        return int(head["sample_rate"]), int(head["channels"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
-class LazyAudioMap(Mapping):
-    def __init__(self, file, start_time, duration):
-        self.file = file
-        self.start_time = start_time
-        self.duration = duration
-        self._dict = None
-
-    def _ensure(self):
-        if self._dict is None:
-            self._dict = get_audio(self.file, self.start_time, self.duration)
-
-    def __getitem__(self, key):
-        self._ensure()
-        return self._dict[key]
-
-    def __iter__(self):
-        self._ensure()
-        return iter(self._dict)
-
-    def __len__(self):
-        self._ensure()
-        return len(self._dict)
+def _silent_audio(sample_rate: int = FALLBACK_SAMPLE_RATE) -> dict:
+    """An empty but structurally valid AUDIO payload."""
+    return {"waveform": torch.zeros((1, 1, 0), dtype=torch.float32), "sample_rate": sample_rate}
 
 
-def lazy_get_audio(file, start_time=0, duration=0, **kwargs):
-    return LazyAudioMap(file, start_time, duration)
+def _load_audio(path: str, start_s: float = 0.0, duration_s: Optional[float] = None) -> dict:
+    """Decode a clip's audio into ComfyUI's AUDIO dict.
+
+    Returns silence rather than raising when there is no audio track, no ffmpeg,
+    or the decode fails: one clip without sound must not abort a batch load.
+    """
+    layout = _audio_layout(path)
+    if layout is None:
+        return _silent_audio()
+    sample_rate, channels = layout
+    if sample_rate <= 0 or channels <= 0:
+        return _silent_audio()
+
+    ffmpeg = _tool_path("ffmpeg", FFMPEG_ENV_VAR)
+    if ffmpeg is None:
+        return _silent_audio(sample_rate)
+
+    argv: List[str] = [ffmpeg, "-v", "error"]
+    if start_s > 0:
+        argv += ["-ss", f"{start_s:.6f}"]
+    argv += ["-i", path]
+    if duration_s is not None and duration_s > 0:
+        argv += ["-t", f"{duration_s:.6f}"]
+    # 32-bit float PCM on stdout is the one format that needs no conversion on
+    # our side: it maps straight onto a float32 tensor.
+    argv += ["-vn", "-f", "f32le", "-acodec", "pcm_f32le", "-"]
+
+    raw = _run_capture(argv)
+    if not raw:
+        return _silent_audio(sample_rate)
+
+    flat = np.frombuffer(raw, dtype=np.float32)
+    usable = (flat.size // channels) * channels
+    if usable == 0:
+        return _silent_audio(sample_rate)
+
+    # ffmpeg writes interleaved samples; ComfyUI wants (batch, channel, sample).
+    planar = flat[:usable].reshape(-1, channels).T.copy()
+    return {
+        "waveform": torch.from_numpy(planar).unsqueeze(0),
+        "sample_rate": sample_rate,
+    }
 
 
-def extract_first_number(s):
-    match = re.search(r"\d+", s)
-    return int(match.group()) if match else float("inf")
+# --------------------------------------------------------------------------- #
+# frames
+# --------------------------------------------------------------------------- #
 
 
-sort_methods = [
-    "None",
-    "Alphabetical (ASC)",
-    "Alphabetical (DESC)",
-    "Numerical (ASC)",
-    "Numerical (DESC)",
-    "Datetime (ASC)",
-    "Datetime (DESC)",
-]
+def _snap(value: int, grid: int = SIZE_GRID) -> int:
+    """Round ``value`` to the nearest positive multiple of ``grid``."""
+    if value <= 0:
+        return 0
+    return max(grid, int(round(value / grid)) * grid)
 
 
-def sort_by(items, base_path=".", method=None):
-    def fullpath(x):
-        return os.path.join(base_path, x)
+def _target_size(src_w: int, src_h: int, want_w: int, want_h: int) -> Tuple[int, int]:
+    """Resolve the output resolution.
 
-    def get_timestamp(path):
-        try:
-            return os.path.getmtime(path)
-        except FileNotFoundError:
-            return float("-inf")
-
-    if method == "Alphabetical (ASC)":
-        return sorted(items)
-    elif method == "Alphabetical (DESC)":
-        return sorted(items, reverse=True)
-    elif method == "Numerical (ASC)":
-        return sorted(items, key=lambda x: extract_first_number(os.path.splitext(x)[0]))
-    elif method == "Numerical (DESC)":
-        return sorted(items, key=lambda x: extract_first_number(os.path.splitext(x)[0]), reverse=True)
-    elif method == "Datetime (ASC)":
-        return sorted(items, key=lambda x: get_timestamp(fullpath(x)))
-    elif method == "Datetime (DESC)":
-        return sorted(items, key=lambda x: get_timestamp(fullpath(x)), reverse=True)
-    else:
-        return items
+    A zero on either axis means "derive it from the other, keeping aspect";
+    zero on both means "keep the source size".  The result is always snapped to
+    :data:`SIZE_GRID`.
+    """
+    if want_w <= 0 and want_h <= 0:
+        return _snap(src_w), _snap(src_h)
+    if want_w <= 0:
+        want_w = int(round(src_w * (want_h / float(src_h)))) if src_h else 0
+    elif want_h <= 0:
+        want_h = int(round(src_h * (want_w / float(src_w)))) if src_w else 0
+    return _snap(want_w), _snap(want_h)
 
 
-def target_size(width, height, custom_width, custom_height, downscale_ratio=8):
-    if downscale_ratio is None:
-        downscale_ratio = 8
+def _keep_indices(n_source: int, stride: float, every_nth: int, cap: int) -> List[int]:
+    """Which source frame indices end up in the output, in order.
 
-    if custom_width == 0 and custom_height == 0:
-        new_w, new_h = width, height
-    elif custom_height == 0:
-        new_h = int(height * (custom_width / width))
-        new_w = int(custom_width)
-    elif custom_width == 0:
-        new_w = int(width * (custom_height / height))
-        new_h = int(custom_height)
-    else:
-        new_w, new_h = int(custom_width), int(custom_height)
+    ``stride`` is source-frames-per-output-frame (1.0 keeps everything).
+    ``every_nth`` decimates on top of that, ``cap`` truncates (0 = no cap).
+    """
+    if n_source <= 0:
+        return []
+    step = stride if stride > 0 else 1.0
+    picked: List[int] = []
+    cursor = 0.0
+    while True:
+        idx = int(cursor)
+        if idx >= n_source:
+            break
+        picked.append(idx)
+        cursor += step
+    if every_nth > 1:
+        picked = picked[::every_nth]
+    if cap > 0:
+        picked = picked[:cap]
+    return picked
 
-    new_w = int(new_w / downscale_ratio + 0.5) * downscale_ratio
-    new_h = int(new_h / downscale_ratio + 0.5) * downscale_ratio
-    return new_w, new_h
 
+def _decode_frames(
+    path: str,
+    *,
+    force_rate: float,
+    want_w: int,
+    want_h: int,
+    frame_load_cap: int,
+    select_every_nth: int,
+) -> Tuple[torch.Tensor, float, float]:
+    """Decode one clip.
 
-def _read_frames_vhs_like(
-    video_path: str,
-    force_rate: float = 0,
-    custom_width: int = 0,
-    custom_height: int = 0,
-    downscale_ratio: int = 8,
-    frame_load_cap: int = 0,
-    select_every_nth: int = 1,
-):
+    Returns ``(frames, output_fps, duration_seconds)`` where ``frames`` is a
+    ComfyUI IMAGE tensor of shape ``(N, H, W, 3)``, RGB, float32 in ``[0, 1]``.
+    """
+    if not _HAS_CV2:
+        raise RuntimeError("OpenCV (opencv-python) is required to read video files.")
 
-    if select_every_nth is None or select_every_nth < 1:
-        select_every_nth = 1
-
-    if not _has_cv2:
-        raise RuntimeError("OpenCV (cv2) not available. Install opencv-python.")
-
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened() or not cap.grab():
-        raise FileNotFoundError(f"Cannot open video: {video_path}")
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps is None or fps <= 0:
-        fps = 30.0
-
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    ok0, frame0 = cap.retrieve()
-    if not ok0 or frame0 is None:
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
         cap.release()
-        raise RuntimeError(f"Cannot retrieve first frame from: {video_path}")
+        raise FileNotFoundError(f"Cannot open video: {path}")
 
-    if width <= 0 or height <= 0:
-        height, width = frame0.shape[:2]
+    try:
+        source_fps = float(cap.get(cv2.CAP_PROP_FPS)) or 0.0
+        n_source = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
+        src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
 
-    base_dt = 1.0 / float(fps)
-    target_dt = base_dt if force_rate == 0 else (1.0 / float(force_rate))
+        stride = 1.0
+        if force_rate > 0 and source_fps > 0:
+            stride = source_fps / float(force_rate)
 
-    effective_dt = target_dt * float(select_every_nth)
-    loaded_fps = 1.0 / effective_dt if effective_dt > 0 else float(fps)
+        wanted = _keep_indices(n_source, stride, max(1, int(select_every_nth)), max(0, int(frame_load_cap)))
+        wanted_set = set(wanted)
+        out_w, out_h = _target_size(src_w, src_h, int(want_w), int(want_h))
 
-    new_w, new_h = target_size(width, height, custom_width, custom_height, downscale_ratio)
-    do_resize = (new_w != width) or (new_h != height)
-
-    def _process_frame(bgr):
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        if do_resize:
-            rgb = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-        return rgb
-
-    frames = []
-
-    evaluated = -1
-
-    def _maybe_add(bgr):
-        nonlocal evaluated
-        evaluated += 1
-        if (evaluated % select_every_nth) != 0:
-            return
-        frames.append(_process_frame(bgr))
-
-    _maybe_add(frame0)
-
-    if frame_load_cap > 0 and len(frames) >= frame_load_cap:
-        cap.release()
-        arr = np.stack(frames, axis=0).astype(np.float32) / 255.0
-        t = torch.from_numpy(arr)
-        loaded_duration = float(len(t) * effective_dt)
-        start_time = 0.0
-        return t, float(fps), float(loaded_fps), loaded_duration, start_time
-
-    time_offset = target_dt
-    time_offset -= target_dt
-
-    while cap.isOpened():
-        if time_offset < target_dt:
-            ok = cap.grab()
-            if not ok:
+        collected: List[np.ndarray] = []
+        last_needed = wanted[-1] if wanted else -1
+        index = 0
+        while index <= last_needed:
+            if not cap.grab():
                 break
-            time_offset += base_dt
+            if index in wanted_set:
+                ok, frame = cap.retrieve()
+                if not ok or frame is None:
+                    break
+                if out_w > 0 and out_h > 0 and (frame.shape[1] != out_w or frame.shape[0] != out_h):
+                    frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+                collected.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            index += 1
+    finally:
+        cap.release()
+
+    if not collected:
+        empty = torch.zeros((0, max(out_h, 1), max(out_w, 1), 3), dtype=torch.float32)
+        return empty, 0.0, 0.0
+
+    stacked = np.stack(collected, axis=0).astype(np.float32) / 255.0
+    out_fps = (source_fps / stride / max(1, int(select_every_nth))) if source_fps > 0 else 0.0
+    duration = (len(collected) / out_fps) if out_fps > 0 else 0.0
+    return torch.from_numpy(stacked), out_fps, duration
+
+
+# --------------------------------------------------------------------------- #
+# node
+# --------------------------------------------------------------------------- #
+
+
+def _list_videos(directory: str) -> List[str]:
+    """Every readable video file directly inside ``directory``."""
+    found: List[str] = []
+    for name in os.listdir(directory):
+        if os.path.splitext(name)[1].lower() not in VIDEO_EXTENSIONS:
             continue
-
-        ok, frame_bgr = cap.retrieve()
-        if not ok or frame_bgr is None:
-            break
-
-        _maybe_add(frame_bgr)
-
-        if frame_load_cap > 0 and len(frames) >= frame_load_cap:
-            break
-
-        time_offset -= target_dt
-
-    cap.release()
-
-    if len(frames) == 0:
-        raise RuntimeError(f"No frames could be read from: {video_path}")
-
-    arr = np.stack(frames, axis=0).astype(np.float32) / 255.0
-    t = torch.from_numpy(arr)
-
-    loaded_duration = float(len(t) * effective_dt)
-    start_time = 0.0
-    return t, float(fps), float(loaded_fps), loaded_duration, start_time
+        if os.path.isfile(os.path.join(directory, name)):
+            found.append(name)
+    return found
 
 
 class LoadVideoBatchListFromDir:
+    """Load a folder of clips as one IMAGE batch (and AUDIO) per clip."""
+
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required": {
                 "directory": ("STRING", {"default": ""}),
@@ -284,7 +319,7 @@ class LoadVideoBatchListFromDir:
                 "select_every_nth": ("INT", {"default": 1, "min": 1, "max": 0xFFFFFFFF, "step": 1}),
                 "start_index": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "step": 1}),
                 "load_always": ("BOOLEAN", {"default": False, "label_on": "enabled", "label_off": "disabled"}),
-                "sort_method": (sort_methods,),
+                "sort_method": (list(SORT_METHODS),),
             },
         }
 
@@ -293,7 +328,7 @@ class LoadVideoBatchListFromDir:
     OUTPUT_IS_LIST = (True, True, False)
 
     FUNCTION = "load_videos"
-    CATEGORY = "video"
+    CATEGORY = "TS Utils/Video"
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
@@ -312,48 +347,34 @@ class LoadVideoBatchListFromDir:
         select_every_nth: int = 1,
         start_index: int = 0,
         load_always: bool = False,
-        sort_method=None,
+        sort_method: Optional[str] = None,
     ):
-        if not os.path.isdir(directory):
+        if not directory or not os.path.isdir(directory):
             raise FileNotFoundError(f"Directory '{directory}' cannot be found.")
 
-        files = os.listdir(directory)
-        if len(files) == 0:
-            raise FileNotFoundError(f"No files in directory '{directory}'.")
-
-        valid_ext = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
-        files = [
-            f
-            for f in files
-            if os.path.isfile(os.path.join(directory, f)) and os.path.splitext(f)[1].lower() in valid_ext
-        ]
-        if len(files) == 0:
-            raise FileNotFoundError(f"No video files in directory '{directory}' (expected: {sorted(valid_ext)}).")
-
-        files = sort_by(files, directory, sort_method)
-        files = files[start_index:]
-        if video_load_cap > 0:
-            files = files[:video_load_cap]
-
-        images_list = []
-        audios_list = []
-
-        for fname in files:
-            path = os.path.join(directory, fname)
-
-            vid, source_fps, loaded_fps, loaded_duration, start_time = _read_frames_vhs_like(
-                path,
-                force_rate=force_rate,
-                custom_width=width,
-                custom_height=height,
-                downscale_ratio=8,
-                frame_load_cap=frame_load_cap,
-                select_every_nth=select_every_nth,
+        names = _list_videos(directory)
+        if not names:
+            raise FileNotFoundError(
+                f"No video files in '{directory}' (looking for: {', '.join(sorted(VIDEO_EXTENSIONS))})."
             )
 
-            images_list.append(vid)
+        names = sort_names(names, directory, sort_method)[int(start_index) :]
+        if video_load_cap > 0:
+            names = names[: int(video_load_cap)]
 
-            audio = lazy_get_audio(path, start_time, loaded_duration)
-            audios_list.append(audio)
+        images: List[torch.Tensor] = []
+        audios: List[dict] = []
+        for name in names:
+            path = os.path.join(directory, name)
+            frames, _fps, duration = _decode_frames(
+                path,
+                force_rate=float(force_rate),
+                want_w=int(width),
+                want_h=int(height),
+                frame_load_cap=int(frame_load_cap),
+                select_every_nth=int(select_every_nth),
+            )
+            images.append(frames)
+            audios.append(_load_audio(path, 0.0, duration or None))
 
-        return (images_list, audios_list, len(images_list))
+        return (images, audios, len(images))
