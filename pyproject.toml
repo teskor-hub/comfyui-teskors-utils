@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-teskors-utils"
-description = "Utility nodes for ComfyUI focused on video workflows, OpenPose stability and chunk-based video generation."
-version = "1.0.0"
+description = "Smooth and stabilise OpenPose in ComfyUI: removes pose jitter, hand flicker and dropped keypoints before ControlNet."
+version = "1.0.1"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
 dependencies = [
@@ -15,4 +15,4 @@ Repository = "https://github.com/teskor-hub/comfyui-teskors-utils"
 [tool.comfy]
 PublisherId = "teskor"
 DisplayName = "Teskor's Utils"
-Icon = ""
+Icon = "https://raw.githubusercontent.com/teskor-hub/comfyui-teskors-utils/main/docs/icon.png"
