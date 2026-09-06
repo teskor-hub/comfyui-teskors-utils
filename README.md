@@ -75,11 +75,12 @@ to `TS Pose Keypoint Smoother`.
 | `render_resolution` | `768` | Short edge of the rendered DWPose/OpenPose control image; keeps long video batches from using the source video's full resolution |
 | `force_body_18` | `False` | Force the COCO-18 skeleton layout |
 | `smooth_hands` | `False` | **Experimental.** Also smooth the 21 finger keypoints |
+| `smooth_face` | `True` | Smooth native DWPose/OpenPose facial landmarks while preserving the full face-point set |
 
 If you only touch one slider, make it `smooth_alpha`. Everything else is
 reasonable out of the box.
 
-### Arms are smoothed; face and fingers are optional
+### Body and face are smoothed; fingers are optional
 
 Worth stating plainly, because "hand jitter" means two different things:
 
@@ -89,8 +90,16 @@ Worth stating plainly, because "hand jitter" means two different things:
   shaking.
 - **Finger keypoints** are a separate 21-point set per hand and are left
   untouched unless you turn on `smooth_hands`.
-- **Face keypoints** are preserved exactly in the DWPose/OpenPose node so subtle
-  expression changes are not flattened.
+- **Face keypoints** stay in the native DWPose/OpenPose `POSE_KEYPOINT` schema and
+  are temporally smoothed by default. The renderer draws the complete landmark set
+  with the same visible point sizes as `comfyui_controlnet_aux`; no ViTPose
+  conversion occurs. Turn off `smooth_face` only when raw facial micro-motion is
+  more important than flicker removal.
+
+The dense-point smoother works in a body-relative coordinate frame, so moving the
+head or wrist across the image is preserved while local landmark vibration is
+reduced. Point counts, ordering and confidence values remain those emitted by the
+original detector.
 
 `smooth_hands` is off by default so that updating the node cannot change output
 you already like.
@@ -102,6 +111,11 @@ you already like.
 When more than one person is detected, something has to decide who the video is
 about. This node scores each track on how much of the clip it covers, how large
 it is (closer to camera), how centrally it sits, and its mean confidence.
+
+Predominantly single-person DWPose clips bypass whole-video track splitting. A
+brief duplicate detection is resolved locally, while the sole detection in every
+other frame is retained. This prevents fast close-up movement from being broken
+into a short surviving track with the remaining frames rendered black.
 
 That combination matters more than it sounds. Ranking purely by "who appears in
 the most frames" loses to a steadily-detected bystander the moment the actual

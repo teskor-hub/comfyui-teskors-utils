@@ -146,7 +146,10 @@ def _draw_body(
     canvases for the xinsr ControlNet checkpoints.
     """
     CH, CW = canvas.shape[:2]
-    stickwidth = 2
+    # Match comfyui_controlnet_aux's native DWPose/OpenPose renderer.  The
+    # previous thin sticks and tiny joints made this output look like a
+    # different pose format even though the data was still POSE_KEYPOINT.
+    stickwidth = 4
     valid = [(x, y, c) for (x, y, c) in pose if _valid_pt(x, y, c, conf_thresh)]
     norm = False
     if valid:
@@ -192,7 +195,7 @@ def _draw_body(
             continue
         x, y = to_px(x, y)
         col = BODY_JOINT_COLORS[j] if j < len(BODY_JOINT_COLORS) else (255, 255, 255)
-        cv2.circle(canvas, (int(x), int(y)), 2, col, thickness=-1)
+        cv2.circle(canvas, (int(x), int(y)), 4, col, thickness=-1)
 
 
 def _draw_hand(canvas: np.ndarray, hand: List[Keypoint], conf_thresh: float) -> None:
@@ -217,17 +220,17 @@ def _draw_hand(canvas: np.ndarray, hand: List[Keypoint], conf_thresh: float) -> 
                 (int(x1), int(y1)),
                 (int(x2), int(y2)),
                 _hsv_to_bgr(i / float(n_edges), 1.0, 1.0),
-                1,
+                2,
                 cv2.LINE_AA,
             )
     for x, y, c in hand:
         if _valid_pt(x, y, c, conf_thresh):
             x, y = to_px(x, y)
-            cv2.circle(canvas, (int(x), int(y)), 1, (0, 0, 255), -1, cv2.LINE_AA)
+            cv2.circle(canvas, (int(x), int(y)), 4, (0, 0, 255), -1, cv2.LINE_AA)
 
 
 def _draw_face(canvas: np.ndarray, face: List[Keypoint], conf_thresh: float) -> None:
-    """Draw face keypoints onto ``canvas`` in place as single white pixels."""
+    """Draw native DWPose/OpenPose face landmarks as visible white points."""
     if not face:
         return
     CH, CW = canvas.shape[:2]
@@ -239,7 +242,7 @@ def _draw_face(canvas: np.ndarray, face: List[Keypoint], conf_thresh: float) -> 
     for x, y, c in face:
         if _valid_pt(x, y, c, conf_thresh):
             x, y = to_px(x, y)
-            cv2.circle(canvas, (int(x), int(y)), 0, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(canvas, (int(x), int(y)), 3, (255, 255, 255), -1, cv2.LINE_AA)
 
 
 def _draw_pose_frame_full(

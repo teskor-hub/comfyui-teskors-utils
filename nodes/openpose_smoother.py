@@ -32,9 +32,13 @@ _TIP_SMOOTH_HANDS = (
     "EXPERIMENTAL: also clean and smooth the hand keypoints. "
     "Off by default; leaving it off reproduces previous output exactly."
 )
+_TIP_SMOOTH_FACE = (
+    "Clean and temporally smooth the native DWPose/OpenPose face keypoints. "
+    "Enabled by default so facial landmarks do not flicker between frames."
+)
 
 
-def _build_smooth_config(kwargs: Dict[str, Any]) -> Tuple[SmoothConfig, float, float, bool, bool]:
+def _build_smooth_config(kwargs: Dict[str, Any]) -> Tuple[SmoothConfig, float, float, bool, bool, bool]:
     """Build one config for both POSEDATA and POSE_KEYPOINT adapters."""
     filter_extra_people = bool(kwargs.get("filter_extra_people", DEFAULT_CONFIG.FILTER_EXTRA_PEOPLE))
     smooth_alpha = float(kwargs.get("smooth_alpha", DEFAULT_CONFIG.ALPHA_BODY))
@@ -43,6 +47,7 @@ def _build_smooth_config(kwargs: Dict[str, Any]) -> Tuple[SmoothConfig, float, f
     conf_thresh_body = float(kwargs.get("conf_thresh_body", DEFAULT_CONFIG.CONF_GATE_BODY))
     conf_thresh_hands = float(kwargs.get("conf_thresh_hands", DEFAULT_CONFIG.CONF_GATE_HAND))
     smooth_hands = bool(kwargs.get("smooth_hands", False))
+    smooth_face = bool(kwargs.get("smooth_face", True))
 
     cfg = SmoothConfig(
         CONF_GATE_BODY=conf_thresh_body,
@@ -56,9 +61,10 @@ def _build_smooth_config(kwargs: Dict[str, Any]) -> Tuple[SmoothConfig, float, f
         DENSE_MAX_GAP_FRAMES=gap_frames,
         DENSE_MIN_RUN_FRAMES=min_run_frames,
         FILTER_EXTRA_PEOPLE=filter_extra_people,
+        FACE_SMOOTH_ENABLED=smooth_face,
         HANDS_SMOOTH_ENABLED=smooth_hands,
     )
-    return cfg, conf_thresh_body, conf_thresh_hands, filter_extra_people, smooth_hands
+    return cfg, conf_thresh_body, conf_thresh_hands, filter_extra_people, smooth_hands, smooth_face
 
 
 def _render_result(
@@ -152,6 +158,7 @@ class KPSSmoothPoseDataAndRender:
             "optional": {
                 "force_body_18": ("BOOLEAN", {"default": False, "tooltip": _TIP_FORCE_18}),
                 "smooth_hands": ("BOOLEAN", {"default": False, "tooltip": _TIP_SMOOTH_HANDS}),
+                "smooth_face": ("BOOLEAN", {"default": True, "tooltip": _TIP_SMOOTH_FACE}),
             },
         }
 
@@ -172,7 +179,9 @@ class KPSSmoothPoseDataAndRender:
             A ``(B, H, W, 3)`` float tensor in 0..1 alongside the new pose_data.  The
             tensor has ``B == 0`` when the input holds no frames.
         """
-        cfg, conf_thresh_body, conf_thresh_hands, filter_extra_people, smooth_hands = _build_smooth_config(kwargs)
+        cfg, conf_thresh_body, conf_thresh_hands, filter_extra_people, smooth_hands, smooth_face = (
+            _build_smooth_config(kwargs)
+        )
         force_body_18 = bool(kwargs.get("force_body_18", False))
 
         pose_data = posedata._coerce_pose_data_to_obj(pose_data)
@@ -180,7 +189,7 @@ class KPSSmoothPoseDataAndRender:
 
         result = smooth_kps_frames(
             frames_json_like,
-            keep_face_untouched=False,
+            keep_face_untouched=not smooth_face,
             keep_hands_untouched=not smooth_hands,
             filter_extra_people=filter_extra_people,
             cfg=cfg,
@@ -220,6 +229,7 @@ class KPSSmoothPoseKeypointAndRender:
             },
             "optional": {
                 "smooth_hands": ("BOOLEAN", {"default": False, "tooltip": _TIP_SMOOTH_HANDS}),
+                "smooth_face": ("BOOLEAN", {"default": True, "tooltip": _TIP_SMOOTH_FACE}),
             },
         }
 
@@ -233,12 +243,14 @@ class KPSSmoothPoseKeypointAndRender:
         if not isinstance(pose_keypoints, list):
             raise ValueError("POSE_KEYPOINT input must be a list of OpenPose frame dictionaries.")
 
-        cfg, conf_thresh_body, conf_thresh_hands, filter_extra_people, smooth_hands = _build_smooth_config(kwargs)
+        cfg, conf_thresh_body, conf_thresh_hands, filter_extra_people, smooth_hands, smooth_face = (
+            _build_smooth_config(kwargs)
+        )
         result = smooth_kps_frames(
             pose_keypoints,
-            keep_face_untouched=True,
+            keep_face_untouched=not smooth_face,
             keep_hands_untouched=not smooth_hands,
-            preserve_untouched_dense=True,
+            preserve_untouched_dense=not smooth_face and not smooth_hands,
             filter_extra_people=filter_extra_people,
             cfg=cfg,
         )

@@ -83,6 +83,36 @@ def _select_subject_per_frame(data: List[Any], *, cfg: SmoothConfig) -> List[Opt
     """
     chosen_people: List[Optional[Dict[str, Any]]] = [None] * len(data)
 
+    # DWPose can briefly emit a duplicate detection even in a genuinely
+    # single-person clip.  Whole-video tracking may split a fast or close-up
+    # subject into several short tracks when the body centre moves farther than
+    # its match radius; choosing only the longest fragment then turns every
+    # other frame completely black.  When multi-person frames are only a tiny
+    # minority, keep the sole detection in every frame and use the normal
+    # per-frame scorer only for those few ambiguous frames.
+    populated: List[Tuple[int, List[Dict[str, Any]]]] = []
+    ambiguous_frames = 0
+    for index, frame in enumerate(data):
+        if not isinstance(frame, dict):
+            continue
+        people = [person for person in (frame.get("people") or []) if isinstance(person, dict)]
+        if not people:
+            continue
+        populated.append((index, people))
+        if len(people) > 1:
+            ambiguous_frames += 1
+    ambiguity_limit = max(2, len(populated) // 50)
+    if populated and ambiguous_frames <= ambiguity_limit:
+        prev_center: Optional[Tuple[float, float]] = None
+        for index, people in populated:
+            chosen = people[0] if len(people) == 1 else _choose_single_person(people, prev_center, cfg=cfg)
+            chosen_people[index] = chosen
+            if chosen:
+                center = _body_center_from_pose(chosen.get("pose_keypoints_2d"))
+                if center:
+                    prev_center = center
+        return chosen_people
+
     main_tr = None
     if cfg.MAIN_PERSON_MODE == "longest_track":
         # Canvas size lets the subject scorer prefer whoever is framed centrally;

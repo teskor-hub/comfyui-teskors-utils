@@ -207,15 +207,9 @@ def _smooth_dense_seq_anchored_to_body(
     Working in that space means a subject walking across frame does not look like
     jitter to the filter.
 
-    KNOWN NO-OP - DO NOT "CLEAN UP" IN ISOLATION.  The normalisation comprehension
-    below emits one value per keypoint instead of three, so every row of ``norm_seq``
-    has length ``Jd`` rather than ``Jd * 3``.  The un-normalisation loop's length
-    check therefore rejects every frame and this function returns an unmodified copy
-    of ``dense_seq``.  It has behaved this way for the whole life of the node, and
-    since the node calls it with ``keep_face_untouched=False`` on every run,
-    repairing it would change every rendered frame for every existing user.  The fix
-    belongs behind a new opt-in widget, together with a regression comparison - not
-    in a refactor whose contract is bit-identical output.
+    The result preserves the producer's native point count and confidence values;
+    only x/y coordinates are filtered.  No BODY_25/COCO or ViTPose conversion is
+    performed here.
     """
     if not dense_seq:
         return dense_seq
@@ -242,10 +236,10 @@ def _smooth_dense_seq_anchored_to_body(
             norm_seq[t] = arr
             continue
         (rx, ry), s = rs
-        norm_seq[t] = [
-            (x - rx) / s if i % 3 == 0 else (y - ry) / s if i % 3 == 1 else c
-            for i, (x, y, c) in enumerate(zip(arr[0::3], arr[1::3], arr[2::3]))
-        ]
+        normalized: List[float] = []
+        for x, y, c in zip(arr[0::3], arr[1::3], arr[2::3]):
+            normalized.extend(((x - rx) / s, (y - ry) / s, c))
+        norm_seq[t] = normalized
 
     if median3:
         norm_seq = _median3_pose_seq(norm_seq, conf_gate=conf_gate_dense)
