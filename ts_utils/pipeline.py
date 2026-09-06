@@ -124,6 +124,7 @@ def smooth_kps_frames(
     *,
     keep_face_untouched: bool = True,
     keep_hands_untouched: bool = True,
+    preserve_untouched_dense: bool = False,
     filter_extra_people: Optional[bool] = None,
     cfg: Optional[SmoothConfig] = None,
 ) -> SmoothResult:
@@ -135,6 +136,8 @@ def smooth_kps_frames(
         keep_face_untouched: skip the face block entirely.
         keep_hands_untouched: skip the hand block entirely.  Note the hand block is
             additionally gated by ``cfg.HANDS_SMOOTH_ENABLED``.
+        preserve_untouched_dense: also skip the final face/hand presence cleanup
+            for dense keypoint groups whose smoothing is disabled.
         filter_extra_people: drop everyone except the subject.  ``None`` means "use
             ``cfg.FILTER_EXTRA_PEOPLE``".
         cfg: tuning parameters; defaults to a fresh :class:`SmoothConfig`.
@@ -371,18 +374,30 @@ def smooth_kps_frames(
         subject_indices[i] = subject_idx
         out_frames.append(frame_out)
 
-    _apply_final_presence_pass(out_frames, subject_indices, cfg=cfg)
+    _apply_final_presence_pass(
+        out_frames,
+        subject_indices,
+        cfg=cfg,
+        clean_face=smooth_face or not preserve_untouched_dense,
+        clean_hands=smooth_hands or not preserve_untouched_dense,
+    )
     return SmoothResult(frames=out_frames, subject_indices=subject_indices)
 
 
 def _apply_final_presence_pass(
-    out_frames: List[Any], subject_indices: List[Optional[int]], *, cfg: SmoothConfig
+    out_frames: List[Any],
+    subject_indices: List[Optional[int]],
+    *,
+    cfg: SmoothConfig,
+    clean_face: bool,
+    clean_hands: bool,
 ) -> None:
     """Run a last de-flicker over the assembled subject and write it back, in place.
 
     The per-frame passes can reintroduce one- or two-frame appearances (a wrist
-    pinned to a hand that itself only existed for a frame, say), so body, hands and
-    face get one more short-run rejection here.
+    pinned to a hand that itself only existed for a frame, say), so the body gets
+    one more short-run rejection here. Hands and face receive it when requested
+    by the caller.
 
     Reads and writes the subject at ``subject_indices[i]``, not blindly
     ``people[0]``: when extra people are kept the subject can sit at any index, and
@@ -404,24 +419,28 @@ def _apply_final_presence_pass(
     eff_min = max(2, cfg.MIN_RUN_FRAMES)
 
     final_body = _denoise_and_fill_gaps_pose_seq(final_body, conf_gate=cfg.CONF_GATE_BODY, min_run=eff_min, max_gap=0)
-    final_lh = _remove_short_presence_runs_kps_seq(
-        final_lh, conf_gate=cfg.CONF_GATE_HAND, min_points_present=1, min_run=eff_min
-    )
-    final_rh = _remove_short_presence_runs_kps_seq(
-        final_rh, conf_gate=cfg.CONF_GATE_HAND, min_points_present=1, min_run=eff_min
-    )
-    final_face = _remove_short_presence_runs_kps_seq(
-        final_face, conf_gate=cfg.CONF_GATE_FACE, min_points_present=1, min_run=eff_min
-    )
+    if clean_hands:
+        final_lh = _remove_short_presence_runs_kps_seq(
+            final_lh, conf_gate=cfg.CONF_GATE_HAND, min_points_present=1, min_run=eff_min
+        )
+        final_rh = _remove_short_presence_runs_kps_seq(
+            final_rh, conf_gate=cfg.CONF_GATE_HAND, min_points_present=1, min_run=eff_min
+        )
+    if clean_face:
+        final_face = _remove_short_presence_runs_kps_seq(
+            final_face, conf_gate=cfg.CONF_GATE_FACE, min_points_present=1, min_run=eff_min
+        )
 
     for i, f in enumerate(out_frames):
         p = _subject_of(f, subject_indices[i])
         if p is None:
             continue
         p["pose_keypoints_2d"] = final_body[i]
-        p["hand_left_keypoints_2d"] = final_lh[i]
-        p["hand_right_keypoints_2d"] = final_rh[i]
-        p["face_keypoints_2d"] = final_face[i]
+        if clean_hands:
+            p["hand_left_keypoints_2d"] = final_lh[i]
+            p["hand_right_keypoints_2d"] = final_rh[i]
+        if clean_face:
+            p["face_keypoints_2d"] = final_face[i]
 
 
 def _subject_of(frame: Any, index: Optional[int]) -> Optional[Dict[str, Any]]:

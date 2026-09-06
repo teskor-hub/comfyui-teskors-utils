@@ -7,9 +7,10 @@ drop out for a frame and pop back, and a limb occasionally snaps somewhere
 impossible. Feed that into ControlNet and the generated video inherits every bit
 of it.
 
-`TS Pose Data Smoother` cleans the pose sequence before it ever reaches your
+The pose smoother nodes clean the sequence before it ever reaches your
 generation: temporal smoothing, gap filling, outlier rejection and subject
-tracking. Built for **WanVideo**, **AnimateDiff** and **ControlNet OpenPose**.
+tracking. They support both **ViTPose/Aligned-AI `POSEDATA`** and the standard
+**DWPose/OpenPose `POSE_KEYPOINT`** output from `comfyui_controlnet_aux`.
 
 ---
 
@@ -50,14 +51,16 @@ reliable way to replace a working CUDA build with a CPU one.
 
 ## Using it
 
-Drop it between detection and ControlNet:
+Use the node matching the detector output:
 
 ```
-Load Video → OpenPose Detection → TS Pose Data Smoother → ControlNet OpenPose → Generation
+ViTPose → TS Pose Data Smoother → ControlNet OpenPose → Generation
+DWPreprocessor (POSE_KEYPOINT output) → TS Pose Keypoint Smoother → ControlNet OpenPose → Generation
 ```
 
-It returns both the cleaned `POSEDATA` and a rendered preview `IMAGE`, so you can
-see what you are feeding forward without wiring up a separate renderer.
+Both nodes return a rendered `IMAGE` for ControlNet plus the cleaned keypoint data.
+Connect the second output of `DWPreprocessor`, not its already-rendered first output,
+to `TS Pose Keypoint Smoother`.
 
 ### Parameters
 
@@ -69,13 +72,14 @@ see what you are feeding forward without wiring up a separate renderer.
 | `min_run_frames` | `3` | Detections that appear for fewer frames than this are treated as noise and removed |
 | `conf_thresh_body` | `0.35` | Body keypoints below this confidence are ignored |
 | `conf_thresh_hands` | `0.6` | Same, for hand keypoints |
+| `render_resolution` | `768` | Short edge of the rendered DWPose/OpenPose control image; keeps long video batches from using the source video's full resolution |
 | `force_body_18` | `False` | Force the COCO-18 skeleton layout |
 | `smooth_hands` | `False` | **Experimental.** Also smooth the 21 finger keypoints |
 
 If you only touch one slider, make it `smooth_alpha`. Everything else is
 reasonable out of the box.
 
-### Arms are smoothed, fingers are not
+### Arms are smoothed; face and fingers are optional
 
 Worth stating plainly, because "hand jitter" means two different things:
 
@@ -85,6 +89,8 @@ Worth stating plainly, because "hand jitter" means two different things:
   shaking.
 - **Finger keypoints** are a separate 21-point set per hand and are left
   untouched unless you turn on `smooth_hands`.
+- **Face keypoints** are preserved exactly in the DWPose/OpenPose node so subtle
+  expression changes are not flattened.
 
 `smooth_hands` is off by default so that updating the node cannot change output
 you already like.
@@ -132,6 +138,8 @@ Small utilities that come along for the ride:
 
 | Node | Purpose |
 |---|---|
+| `TS Pose Data Smoother` | Smooth ViTPose/Aligned-AI `POSEDATA` |
+| `TS Pose Keypoint Smoother` | Smooth standard DWPose/OpenPose `POSE_KEYPOINT` and render it for ControlNet |
 | `TS Rename Files In Dir` | Renumber a folder into a clean sequence. Has `dry_run` — use it first |
 | `TS Save Pose Data` | Cache `POSEDATA` to disk as `.npz` |
 | `TS Load Pose Data` | Load it back, so you can iterate on generation without re-running detection |
