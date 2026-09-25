@@ -2,6 +2,7 @@ from .nodes.save_load_pose import TSSavePoseDataAsPickle, TSLoadPoseDataPickle
 from .nodes.openpose_smoother import KPSSmoothPoseDataAndRender, KPSSmoothPoseKeypointAndRender
 from .nodes.rename_files import RenameFilesInDir
 from .nodes.color_match import TSColorMatchSequentialBias
+from .nodes.half_mask_video import TSHalfMaskVideoExtractGenerated, TSHalfMaskVideoLayout
 
 
 NODE_CLASS_MAPPINGS = {
@@ -11,6 +12,8 @@ NODE_CLASS_MAPPINGS = {
     "TSPoseKeypointSmoother": KPSSmoothPoseKeypointAndRender,
     "TSRenameFilesInDir": RenameFilesInDir,
     "TSColorMatch": TSColorMatchSequentialBias,
+    "TSHalfMaskVideoLayout": TSHalfMaskVideoLayout,
+    "TSHalfMaskVideoExtractGenerated": TSHalfMaskVideoExtractGenerated,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -20,6 +23,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TSPoseKeypointSmoother": "TS Pose Keypoint Smoother (DWPose/OpenPose)",
     "TSRenameFilesInDir": "TS Rename Files In Dir",
     "TSColorMatch": "TS Color Match",
+    "TSHalfMaskVideoLayout": "TS Half Mask Video Layout",
+    "TSHalfMaskVideoExtractGenerated": "TS Extract Generated Video",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

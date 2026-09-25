@@ -146,6 +146,34 @@ WanVideo Animate Embeds → Combine Frames → TS Color Match → Save Video
 
 ---
 
+## Half Mask Video layout
+
+`TS Half Mask Video Layout` prepares the side-by-side latent canvas used for
+motion transfer workflows. Connect a source video and choose:
+
+- LEFT short-edge quality from 200 through 2048, or `max`. The source is never
+  upscaled beyond its native resolution.
+- RIGHT aspect ratio: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, or 21:9.
+- RIGHT short-edge quality from 200 through 2048.
+
+The node returns the wide canvas, a noise mask that is zero on LEFT and one on
+RIGHT, reusable layout metadata, and the exact canvas/output dimensions. All
+sizes are snapped to a 32-pixel grid for video diffusion models.
+
+After decoding the sampled wide video, connect it and the layout metadata to
+`TS Extract Generated Video`. It returns only the generated RIGHT panel at the
+selected output size.
+
+```
+Source frames → TS Half Mask Video Layout → VAE Encode → Set Latent Noise Mask
+Decoded wide frames + layout → TS Extract Generated Video → Save Video
+```
+
+Very high short-edge values can create extremely large portrait or ultrawide
+canvases. Check VRAM use with a short test clip before running the full video.
+
+---
+
 ## Also included
 
 Small utilities that come along for the ride:
@@ -157,6 +185,8 @@ Small utilities that come along for the ride:
 | `TS Rename Files In Dir` | Renumber a folder into a clean sequence. Has `dry_run` — use it first |
 | `TS Save Pose Data` | Cache `POSEDATA` to disk as `.npz` |
 | `TS Load Pose Data` | Load it back, so you can iterate on generation without re-running detection |
+| `TS Half Mask Video Layout` | Build a resolution-aware LEFT source / RIGHT generation canvas and mask |
+| `TS Extract Generated Video` | Crop only the generated RIGHT panel using the saved layout |
 
 ### Pose cache format
 
