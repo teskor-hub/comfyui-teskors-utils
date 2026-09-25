@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 
 CANVAS_MULTIPLE = 32
+BLACK_BAND_LUMA_THRESHOLD = 0.12
 
 QUALITY_OPTIONS = [
     "200",
@@ -140,7 +141,7 @@ def _detect_black_band(images, side):
     detected = 0
     edge_profile = profile[:max_trim] if side == "left" else profile[-max_trim:].flip(0)
     for value in edge_profile:
-        if value.item() <= 0.08:
+        if value.item() <= BLACK_BAND_LUMA_THRESHOLD:
             detected += 1
         else:
             break
