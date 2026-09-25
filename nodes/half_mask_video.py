@@ -51,7 +51,7 @@ ASPECT_RATIOS = {
 
 SEAM_TRIM_OPTIONS = ["auto", "0", "8", "16", "24", "32", "48", "64", "96", "128"]
 
-CROP_MODE_OPTIONS = ["fit", "fill_height_center_crop"]
+CROP_MODE_OPTIONS = ["fit", "fill_height_center_crop", "match_right_center_crop"]
 
 
 def _snap_nearest(value):
@@ -204,7 +204,8 @@ class TSHalfMaskVideoLayout:
         "preserved, the RIGHT panel is masked for generation, and all dimensions are "
         "snapped to a 32-pixel grid. fit preserves the complete source frame without "
         "upscaling. fill_height_center_crop fills the canvas height and crops the "
-        "source equally from both sides."
+        "source equally from both sides. match_right_center_crop makes LEFT exactly "
+        "the same size as RIGHT and uses a centered cover crop."
     )
 
     def build(
@@ -236,7 +237,15 @@ class TSHalfMaskVideoLayout:
             right_quality,
         )
 
-        if crop_mode == "fill_height_center_crop":
+        if crop_mode == "match_right_center_crop":
+            left_width = right_width
+            left_height = right_height
+            resized_source = _resize_to_cover_center_crop(
+                source_video,
+                left_width,
+                left_height,
+            )
+        elif crop_mode == "fill_height_center_crop":
             left_width = fitted_left_width
             left_height = right_height
             resized_source = _resize_to_cover_center_crop(

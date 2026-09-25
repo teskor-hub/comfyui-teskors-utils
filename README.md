@@ -158,6 +158,8 @@ motion transfer workflows. Connect a source video and choose:
 - Crop mode: `fit` keeps the complete LEFT frame and can add black bars above
   and below it. `fill_height_center_crop` fills the full canvas height without
   distortion and crops excess source content equally from the left and right.
+  `match_right_center_crop` makes LEFT exactly the same width and height as
+  RIGHT, using a centred cover crop when their source aspect ratios differ.
 
 The node returns the wide canvas, a noise mask that is zero on LEFT and one on
 RIGHT, reusable layout metadata, and the exact canvas/output dimensions. All
