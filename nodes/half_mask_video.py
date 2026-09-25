@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -48,6 +50,8 @@ ASPECT_RATIOS = {
 
 SEAM_TRIM_OPTIONS = ["auto", "0", "8", "16", "24", "32", "48", "64", "96", "128"]
 
+CROP_MODE_OPTIONS = ["fit", "fill_height_center_crop"]
+
 
 def _snap_nearest(value):
     return max(CANVAS_MULTIPLE, int(round(float(value) / CANVAS_MULTIPLE)) * CANVAS_MULTIPLE)
@@ -69,6 +73,20 @@ def _resize_frames(images, width, height):
         antialias=True,
     )
     return resized.movedim(1, -1).clamp(0.0, 1.0)
+
+
+def _resize_to_cover_center_crop(images, width, height):
+    """Fill the target rectangle without distortion, then crop its center."""
+    source_height = images.shape[1]
+    source_width = images.shape[2]
+    scale = max(width / source_width, height / source_height)
+    resized_width = max(width, math.ceil(source_width * scale))
+    resized_height = max(height, math.ceil(source_height * scale))
+    resized = _resize_frames(images, resized_width, resized_height)
+
+    left = max(0, (resized_width - width) // 2)
+    top = max(0, (resized_height - height) // 2)
+    return resized[:, top : top + height, left : left + width, :]
 
 
 def _fit_source_dimensions(source_width, source_height, quality):
@@ -143,6 +161,9 @@ class TSHalfMaskVideoLayout:
                     {"default": "9:16 (Portrait Widescreen)"},
                 ),
                 "right_quality": (QUALITY_OPTIONS, {"default": "350"}),
+            },
+            "optional": {
+                "crop_mode": (CROP_MODE_OPTIONS, {"default": "fit"}),
             }
         }
 
@@ -170,11 +191,20 @@ class TSHalfMaskVideoLayout:
     CATEGORY = "Teskor's Utils/Video"
     DESCRIPTION = (
         "Builds a side-by-side canvas for Half Mask Video. The LEFT source panel is "
-        "preserved, the RIGHT panel is masked for generation, source resolution is "
-        "never upscaled, and all dimensions are snapped to a 32-pixel grid."
+        "preserved, the RIGHT panel is masked for generation, and all dimensions are "
+        "snapped to a 32-pixel grid. fit preserves the complete source frame without "
+        "upscaling. fill_height_center_crop fills the canvas height and crops the "
+        "source equally from both sides."
     )
 
-    def build(self, source_video, left_quality, right_aspect_ratio, right_quality):
+    def build(
+        self,
+        source_video,
+        left_quality,
+        right_aspect_ratio,
+        right_quality,
+        crop_mode="fit",
+    ):
         if source_video.ndim != 4 or source_video.shape[-1] not in (3, 4):
             raise ValueError(
                 "source_video must be an IMAGE batch shaped [frames, height, width, channels]"
@@ -183,8 +213,10 @@ class TSHalfMaskVideoLayout:
         frame_count, source_height, source_width, channels = source_video.shape
         if frame_count < 1:
             raise ValueError("source_video contains no frames")
+        if crop_mode not in CROP_MODE_OPTIONS:
+            raise ValueError(f"Unsupported crop_mode: {crop_mode}")
 
-        left_width, left_height = _fit_source_dimensions(
+        fitted_left_width, fitted_left_height = _fit_source_dimensions(
             source_width,
             source_height,
             left_quality,
@@ -194,13 +226,25 @@ class TSHalfMaskVideoLayout:
             right_quality,
         )
 
+        if crop_mode == "fill_height_center_crop":
+            left_width = fitted_left_width
+            left_height = right_height
+            resized_source = _resize_to_cover_center_crop(
+                source_video,
+                left_width,
+                left_height,
+            )
+        else:
+            left_width = fitted_left_width
+            left_height = fitted_left_height
+            resized_source = _resize_frames(source_video, left_width, left_height)
+
         canvas_width = left_width + right_width
         canvas_height = max(left_height, right_height)
         left_y = (canvas_height - left_height) // 2
         right_x = left_width
         right_y = (canvas_height - right_height) // 2
 
-        resized_source = _resize_frames(source_video, left_width, left_height)
         canvas = torch.zeros(
             (frame_count, canvas_height, canvas_width, channels),
             dtype=source_video.dtype,
@@ -235,6 +279,7 @@ class TSHalfMaskVideoLayout:
             "left_quality": left_quality,
             "right_quality": right_quality,
             "right_aspect_ratio": right_aspect_ratio,
+            "crop_mode": crop_mode,
         }
 
         return (

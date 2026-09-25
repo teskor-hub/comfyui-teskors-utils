@@ -152,9 +152,12 @@ WanVideo Animate Embeds → Combine Frames → TS Color Match → Save Video
 motion transfer workflows. Connect a source video and choose:
 
 - LEFT short-edge quality from 200 through 2048, or `max`. The source is never
-  upscaled beyond its native resolution.
+  upscaled beyond its native resolution in `fit` mode.
 - RIGHT aspect ratio: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, or 21:9.
 - RIGHT short-edge quality from 200 through 2048.
+- Crop mode: `fit` keeps the complete LEFT frame and can add black bars above
+  and below it. `fill_height_center_crop` fills the full canvas height without
+  distortion and crops excess source content equally from the left and right.
 
 The node returns the wide canvas, a noise mask that is zero on LEFT and one on
 RIGHT, reusable layout metadata, and the exact canvas/output dimensions. All
