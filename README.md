@@ -162,7 +162,10 @@ sizes are snapped to a 32-pixel grid for video diffusion models.
 
 After decoding the sampled wide video, connect it and the layout metadata to
 `TS Extract Generated Video`. It returns only the generated RIGHT panel at the
-selected output size.
+selected output size. Its `left_seam_trim` defaults to `auto`, which detects and
+removes a persistent near-black latent seam at the left edge before restoring
+the exact selected resolution. Manual trim values from 0 to 128 pixels are also
+available.
 
 ```
 Source frames → TS Half Mask Video Layout → VAE Encode → Set Latent Noise Mask

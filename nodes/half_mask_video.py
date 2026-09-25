@@ -46,6 +46,8 @@ ASPECT_RATIOS = {
     "21:9 (Ultrawide)": (21, 9),
 }
 
+SEAM_TRIM_OPTIONS = ["auto", "0", "8", "16", "24", "32", "48", "64", "96", "128"]
+
 
 def _snap_nearest(value):
     return max(CANVAS_MULTIPLE, int(round(float(value) / CANVAS_MULTIPLE)) * CANVAS_MULTIPLE)
@@ -98,6 +100,35 @@ def _dimensions_from_aspect(aspect_ratio, short_edge):
         width = _snap_nearest(short_edge * ratio_width / ratio_height)
 
     return width, height
+
+
+def _detect_left_black_band(images):
+    """Find a persistent near-black band at the left edge without scanning every pixel."""
+    frame_step = max(1, images.shape[0] // 16)
+    row_step = max(1, images.shape[1] // 128)
+    sample = images[::frame_step, ::row_step, :, :3].float()
+    luminance = (
+        sample[..., 0] * 0.2126
+        + sample[..., 1] * 0.7152
+        + sample[..., 2] * 0.0722
+    )
+    profile = torch.quantile(
+        luminance.permute(2, 0, 1).reshape(images.shape[2], -1),
+        0.95,
+        dim=1,
+    )
+
+    max_trim = min(images.shape[2] // 4, 128)
+    detected = 0
+    for value in profile[:max_trim]:
+        if value.item() <= 0.08:
+            detected += 1
+        else:
+            break
+
+    if detected < 4:
+        return 0
+    return min(detected + 2, max_trim)
 
 
 class TSHalfMaskVideoLayout:
@@ -225,6 +256,7 @@ class TSHalfMaskVideoExtractGenerated:
             "required": {
                 "decoded_wide_video": ("IMAGE",),
                 "layout": ("TS_HALF_MASK_LAYOUT",),
+                "left_seam_trim": (SEAM_TRIM_OPTIONS, {"default": "auto"}),
             }
         }
 
@@ -236,7 +268,7 @@ class TSHalfMaskVideoExtractGenerated:
         "Returns only the generated RIGHT panel from a decoded Half Mask Video result."
     )
 
-    def extract(self, decoded_wide_video, layout):
+    def extract(self, decoded_wide_video, layout, left_seam_trim="auto"):
         if not isinstance(layout, dict) or layout.get("version") != 1:
             raise ValueError("Invalid Half Mask Video layout")
         if decoded_wide_video.ndim != 4:
@@ -257,6 +289,15 @@ class TSHalfMaskVideoExtractGenerated:
         height = max(1, min(height, actual_height - y))
 
         generated = decoded_wide_video[:, y : y + height, x : x + width, :]
+        seam_trim = (
+            _detect_left_black_band(generated)
+            if left_seam_trim == "auto"
+            else int(left_seam_trim)
+        )
+        seam_trim = max(0, min(seam_trim, generated.shape[2] - CANVAS_MULTIPLE))
+        if seam_trim:
+            generated = generated[:, :, seam_trim:, :]
+
         if (
             generated.shape[2] != layout["right_width"]
             or generated.shape[1] != layout["right_height"]
