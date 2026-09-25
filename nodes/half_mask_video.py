@@ -120,8 +120,8 @@ def _dimensions_from_aspect(aspect_ratio, short_edge):
     return width, height
 
 
-def _detect_left_black_band(images):
-    """Find a persistent near-black band at the left edge without scanning every pixel."""
+def _detect_black_band(images, side):
+    """Find a persistent near-black edge band without scanning every pixel."""
     frame_step = max(1, images.shape[0] // 16)
     row_step = max(1, images.shape[1] // 128)
     sample = images[::frame_step, ::row_step, :, :3].float()
@@ -138,7 +138,8 @@ def _detect_left_black_band(images):
 
     max_trim = min(images.shape[2] // 4, 128)
     detected = 0
-    for value in profile[:max_trim]:
+    edge_profile = profile[:max_trim] if side == "left" else profile[-max_trim:].flip(0)
+    for value in edge_profile:
         if value.item() <= 0.08:
             detected += 1
         else:
@@ -147,6 +148,14 @@ def _detect_left_black_band(images):
     if detected < 4:
         return 0
     return min(detected + 2, max_trim)
+
+
+def _detect_left_black_band(images):
+    return _detect_black_band(images, "left")
+
+
+def _detect_right_black_band(images):
+    return _detect_black_band(images, "right")
 
 
 class TSHalfMaskVideoLayout:
@@ -302,6 +311,9 @@ class TSHalfMaskVideoExtractGenerated:
                 "decoded_wide_video": ("IMAGE",),
                 "layout": ("TS_HALF_MASK_LAYOUT",),
                 "left_seam_trim": (SEAM_TRIM_OPTIONS, {"default": "auto"}),
+            },
+            "optional": {
+                "right_seam_trim": (SEAM_TRIM_OPTIONS, {"default": "auto"}),
             }
         }
 
@@ -310,10 +322,17 @@ class TSHalfMaskVideoExtractGenerated:
     FUNCTION = "extract"
     CATEGORY = "Teskor's Utils/Video"
     DESCRIPTION = (
-        "Returns only the generated RIGHT panel from a decoded Half Mask Video result."
+        "Returns only the generated RIGHT panel and removes persistent black bands "
+        "from either edge before restoring the selected output resolution."
     )
 
-    def extract(self, decoded_wide_video, layout, left_seam_trim="auto"):
+    def extract(
+        self,
+        decoded_wide_video,
+        layout,
+        left_seam_trim="auto",
+        right_seam_trim="auto",
+    ):
         if not isinstance(layout, dict) or layout.get("version") != 1:
             raise ValueError("Invalid Half Mask Video layout")
         if decoded_wide_video.ndim != 4:
@@ -339,9 +358,22 @@ class TSHalfMaskVideoExtractGenerated:
             if left_seam_trim == "auto"
             else int(left_seam_trim)
         )
+        right_trim = (
+            _detect_right_black_band(generated)
+            if right_seam_trim == "auto"
+            else int(right_seam_trim)
+        )
         seam_trim = max(0, min(seam_trim, generated.shape[2] - CANVAS_MULTIPLE))
-        if seam_trim:
-            generated = generated[:, :, seam_trim:, :]
+        right_trim = max(
+            0,
+            min(
+                right_trim,
+                generated.shape[2] - seam_trim - CANVAS_MULTIPLE,
+            ),
+        )
+        right_edge = generated.shape[2] - right_trim if right_trim else generated.shape[2]
+        if seam_trim or right_trim:
+            generated = generated[:, :, seam_trim:right_edge, :]
 
         if (
             generated.shape[2] != layout["right_width"]
